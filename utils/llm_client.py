@@ -1,4 +1,6 @@
-"""Official Google GenAI SDK wrapper with Pydantic structured output validation and safe JSON retries."""
+"""Official Google GenAI SDK wrapper using the Gemini Interactions API (`client.interactions.create`)
+with Pydantic structured output validation, rate-limit/timeout retries, and safe fallback.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ except ImportError:
     types = None  # type: ignore[assignment]
     APIError = Exception  # type: ignore[assignment,misc]
     _HAS_GENAI = False
+
 from pydantic import BaseModel, ValidationError
 from tenacity import (
     retry,
@@ -40,14 +43,28 @@ class MalformedLLMJSONError(Exception):
     """Internal exception triggering automatic retry when Gemini returns malformed JSON or schema mismatch."""
 
 
+def _strip_code_fences(raw_text: str) -> str:
+    """Remove accidental markdown code fences around JSON output."""
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    return cleaned
+
+
 class GeminiClient:
-    """Thread-safe wrapper around the official `google-genai` SDK (`genai.Client`)."""
+    """Thread-safe wrapper around the official `google-genai` SDK using the Gemini Interactions API."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model_name: str = CONFIG.DEFAULT_GEMINI_MODEL,
         temperature: float = CONFIG.LLM_TEMPERATURE,
+        timeout_seconds: float = float(CONFIG.API_TIMEOUT_SECONDS),
     ) -> None:
         if not _HAS_GENAI:
             raise LLMServiceError(
@@ -61,6 +78,7 @@ class GeminiClient:
         self._api_key = resolved_key
         self.model_name = model_name
         self.temperature = temperature
+        self.timeout_seconds = max(15.0, float(timeout_seconds))
         try:
             self.client = genai.Client(
                 api_key=self._api_key,
@@ -68,11 +86,34 @@ class GeminiClient:
             )
         except Exception as exc:
             safe_msg = scrub_secrets_from_message(str(exc), [self._api_key])
-            raise LLMServiceError(f"Failed to initialize Google GenAI client: {safe_msg}") from exc
+            raise LLMServiceError(
+                f"Failed to initialize Google GenAI client: {safe_msg}"
+            ) from exc
+
+    def _extract_interaction_text(self, interaction: object) -> str:
+        """Extract the final text output from a Gemini Interactions API response."""
+        outputs = getattr(interaction, "outputs", None) or []
+        for output in reversed(outputs):
+            text_val = getattr(output, "text", None)
+            if isinstance(text_val, str) and text_val.strip():
+                return text_val.strip()
+        return ""
 
     def test_connection(self) -> Tuple[bool, str]:
         """Verify Gemini API connectivity with a minimal request without exposing credentials."""
         try:
+            if hasattr(self.client, "interactions"):
+                interaction = self.client.interactions.create(
+                    model=self.model_name,
+                    input="Reply with the single word OK.",
+                    generation_config={"temperature": 0.0},
+                    timeout=self.timeout_seconds,
+                )
+                text_out = self._extract_interaction_text(interaction)
+                if text_out:
+                    return True, f"Connected to Gemini (`{self.model_name}`) via Interactions API."
+                return False, "Gemini returned an empty response."
+
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents="Reply with OK.",
@@ -99,21 +140,38 @@ class GeminiClient:
         user_prompt: str,
         response_schema: Type[T],
     ) -> T:
-        """Execute a structured JSON generation call to Gemini, retrying safely on malformed JSON."""
+        """Execute a structured JSON generation call via Gemini Interactions API (with models.generate_content fallback)."""
+        if hasattr(self.client, "interactions"):
+            interaction = self.client.interactions.create(
+                model=self.model_name,
+                input=user_prompt,
+                system_instruction=system_instruction,
+                response_format=response_schema.model_json_schema(),
+                generation_config={"temperature": self.temperature},
+                timeout=self.timeout_seconds,
+            )
+            raw_text = _strip_code_fences(self._extract_interaction_text(interaction))
+            if not raw_text:
+                raise MalformedLLMJSONError("Gemini Interactions API returned an empty response body.")
+            try:
+                return response_schema.model_validate_json(raw_text)
+            except (ValidationError, json.JSONDecodeError) as parse_err:
+                logger.warning("Malformed JSON or schema mismatch from Interactions API; retrying...")
+                raise MalformedLLMJSONError(str(parse_err)) from parse_err
+
+        # Fallback for older google-genai SDKs without `client.interactions`
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=self.temperature,
             response_mime_type="application/json",
             response_schema=response_schema,
         )
-
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=user_prompt,
             config=config,
         )
 
-        # 1. If the SDK parsed the response directly into our Pydantic model
         parsed_obj = getattr(response, "parsed", None)
         if isinstance(parsed_obj, response_schema):
             return parsed_obj
@@ -123,18 +181,9 @@ class GeminiClient:
             except ValidationError as val_err:
                 raise MalformedLLMJSONError(str(val_err)) from val_err
 
-        # 2. Otherwise parse raw JSON text and validate via Pydantic
-        raw_text = (response.text or "").strip()
+        raw_text = _strip_code_fences(response.text or "")
         if not raw_text:
             raise MalformedLLMJSONError("Gemini returned an empty response body.")
-
-        if raw_text.startswith("```"):
-            lines = raw_text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            raw_text = "\n".join(lines).strip()
 
         try:
             return response_schema.model_validate_json(raw_text)

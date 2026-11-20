@@ -24,12 +24,12 @@ class AppConfig:
     APP_VERSION: str = "2.1.0"
 
     # Gemini Model Options (official google-genai models)
-    DEFAULT_GEMINI_MODEL: str = "gemini-2.5-flash"
+    DEFAULT_GEMINI_MODEL: str = "gemini-3.8-flash"
     AVAILABLE_GEMINI_MODELS: List[str] = field(
         default_factory=lambda: [
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
         ]
     )
 
