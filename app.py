@@ -5,9 +5,12 @@ Main Streamlit application entry point implementing a Google Material Design 3 (
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from components.claim_cards import render_claim_cards
 from components.dashboard import render_dashboard
@@ -114,9 +117,12 @@ def run_verification_pipeline(
     progress_bar = st.progress(0.05)
     partial_results: List[ClaimVerificationResult] = []
     doc_topic: str = "General Document"
+    llm_client: Optional[GeminiClient] = None
+    search_service: Optional[TavilySearchService] = None
 
     try:
         # Step 1: Reading document
+        logger.info("Pipeline Stage 1/5: Reading document '%s' (%d pages)", extracted_pdf.metadata.filename, len(extracted_pdf.pages))
         _render_five_step_tracker(
             tracker_slot,
             current_step=1,
@@ -134,6 +140,7 @@ def run_verification_pipeline(
         progress_bar.progress(0.15)
 
         # Step 2: Extracting factual claims (with document-hash + model + max_claims session cache)
+        logger.info("Pipeline Stage 2/5: Extracting factual claims (max_claims=%d)", settings.max_claims)
         extraction_cache: Dict[str, Tuple[str, List[ExtractedClaim]]] = (
             st.session_state.setdefault("gemini_extraction_cache", {})
         )
@@ -161,6 +168,10 @@ def run_verification_pipeline(
             )
             extraction_cache[ext_cache_key] = (doc_topic, claims)
 
+        # Always preserve extracted claims in session state before starting web search
+        st.session_state["extracted_claims"] = claims
+        logger.info("Pipeline Stage 2/5 complete: %d claims extracted", len(claims))
+
         if not claims:
             tracker_slot.empty()
             progress_bar.empty()
@@ -171,6 +182,7 @@ def run_verification_pipeline(
             return
 
         # Step 3: Searching the live web independently for each extracted claim
+        logger.info("Pipeline Stage 3/5: Searching live web evidence for %d claims", len(claims))
         def on_search_progress(frac: float, msg: str) -> None:
             progress_bar.progress(min(0.68, 0.38 + frac * 0.30))
             _render_five_step_tracker(tracker_slot, current_step=3, detail_msg=msg)
@@ -182,6 +194,7 @@ def run_verification_pipeline(
             )
         )
         st.session_state["claim_evidence_bundles"] = evidence_bundles
+        logger.info("Pipeline Stage 3/5 complete: %d evidence bundles collected", len(evidence_bundles))
 
         any_search_warnings = [
             f"{cid}: {b.search_warning}"
@@ -195,6 +208,7 @@ def run_verification_pipeline(
             )
 
         # Step 4: Evaluating evidence & synthesizing verdicts in controlled batches, preserving partial results
+        logger.info("Pipeline Stage 4/5: Verifying %d claims", len(claims))
         verifier = FactVerifier(
             llm_client=llm_client,
             search_service=search_service,
@@ -217,7 +231,7 @@ def run_verification_pipeline(
                 try:
                     res = verifier.verify_claim_with_bundle(bundle)
                 except Exception as claim_err:
-                    # Preserve all completed results if a later claim fails
+                    logger.exception("Error verifying claim %s", claim.claim_id)
                     res = ClaimVerificationResult(
                         claim_id=claim.claim_id,
                         original_claim=claim.claim_text,
@@ -235,6 +249,7 @@ def run_verification_pipeline(
                 st.session_state["partial_verification_results"] = list(partial_results)
 
         # Step 5: Preparing report
+        logger.info("Pipeline Stage 5/5: Compiling final report")
         progress_bar.progress(0.97)
         _render_five_step_tracker(
             tracker_slot,
@@ -260,8 +275,10 @@ def run_verification_pipeline(
         st.rerun()
 
     except (LLMServiceError, WebSearchError) as service_err:
+        logger.error("Verification pipeline service error: %s", service_err)
+        tracker_slot.empty()
         progress_bar.empty()
-        if partial_results:
+        if partial_results and llm_client is not None and search_service is not None:
             verifier_fallback = FactVerifier(llm_client=llm_client, search_service=search_service)
             partial_report = verifier_fallback._compile_report(
                 results=partial_results,
@@ -275,8 +292,22 @@ def run_verification_pipeline(
         else:
             st.error(f"**Verification Service Error:** {service_err}")
     except Exception as exc:
+        logger.exception("Unexpected error during verification pipeline")
+        tracker_slot.empty()
         progress_bar.empty()
-        st.error(f"**An unexpected error occurred during analysis:** {exc}")
+        if partial_results and llm_client is not None and search_service is not None:
+            verifier_fallback = FactVerifier(llm_client=llm_client, search_service=search_service)
+            partial_report = verifier_fallback._compile_report(
+                results=partial_results,
+                document_metadata=extracted_pdf.metadata,
+                document_topic=doc_topic,
+            )
+            st.session_state["factcheck_report"] = partial_report
+            st.warning(
+                f"Analysis interrupted ({exc}), but **{len(partial_results)} completed claim verification(s)** were preserved."
+            )
+        else:
+            st.error(f"**An unexpected error occurred during analysis:** {exc}")
 
 
 def _render_no_report_empty_state(page_title: str) -> None:

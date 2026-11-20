@@ -36,8 +36,8 @@ class AppConfig:
     # PDF Processing Limits
     MAX_PDF_SIZE_MB: int = 25
     MAX_PDF_PAGES: int = 75
-    CHUNK_CHAR_SIZE: int = 6000
-    CHUNK_CHAR_OVERLAP: int = 400
+    CHUNK_CHAR_SIZE: int = 3200
+    CHUNK_CHAR_OVERLAP: int = 250
 
     # Claim Extraction & Verification Defaults
     DEFAULT_MAX_CLAIMS: int = 10
@@ -46,7 +46,9 @@ class AppConfig:
     DEFAULT_SEARCH_RESULTS_PER_CLAIM: int = 5
     DEFAULT_SEARCH_DEPTH: str = "advanced"
     LLM_TEMPERATURE: float = 0.05
-    API_TIMEOUT_SECONDS: int = 45
+    API_CONNECT_TIMEOUT_SECONDS: float = 10.0
+    API_READ_TIMEOUT_SECONDS: float = 75.0
+    API_TIMEOUT_SECONDS: int = 75
 
 
 # Material Design 3 Light & Dark Theme Tokens
