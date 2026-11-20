@@ -1,0 +1,16 @@
+# FactCheck AI – The Truth Layer
+# Production dependencies compatible with Python 3.11+ and Streamlit Community Cloud
+
+streamlit>=1.38.0,<2.0.0
+google-genai>=1.0.0
+tavily-python>=0.5.0
+PyMuPDF>=1.24.0
+pydantic>=2.7.0,<3.0.0
+pandas>=2.2.0
+plotly>=5.22.0
+reportlab>=4.2.0
+python-dotenv>=1.0.1
+tenacity>=8.3.0
+pytesseract>=0.3.10
+Pillow>=10.3.0
+pytest>=8.0.0

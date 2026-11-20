@@ -1,0 +1,5 @@
+# OS-level packages for Streamlit Community Cloud
+# Includes MuPDF and Tesseract OCR for scanned PDF fallback
+libmupdf-dev
+tesseract-ocr
+tesseract-ocr-eng

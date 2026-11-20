@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# OS and IDE files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs and temporary artifacts
+*.log
+tmp/
+temp/
+output/
+*.pdf.tmp
